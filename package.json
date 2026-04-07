@@ -1,0 +1,12 @@
+{
+  "name": "mie359-study-site",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Static MIE359 study site for Cloudflare Pages.",
+  "scripts": {
+    "build:data": "python3 build.py",
+    "build:static": "python3 export_static.py",
+    "build": "python3 build.py && python3 export_static.py",
+    "serve": "python3 -m http.server 8000"
+  }
+}
