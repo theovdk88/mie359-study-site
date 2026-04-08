@@ -7,6 +7,8 @@
     "build:data": "python3 build.py",
     "build:static": "python3 export_static.py",
     "build": "python3 build.py && python3 export_static.py",
+    "deploy:pages": "python3 build.py && python3 export_static.py && npx wrangler pages deploy dist --project-name mie359-study-site",
+    "deploy:assets": "python3 build.py && python3 export_static.py && npx wrangler deploy",
     "serve": "python3 -m http.server 8000"
   }
 }

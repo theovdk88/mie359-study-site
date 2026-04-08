@@ -32,3 +32,23 @@ http://localhost:8000
 
 - Build command: `python3 build.py && python3 export_static.py`
 - Build output directory: `dist`
+
+## Terminal deployment
+
+Preferred Cloudflare Pages terminal deploy:
+
+```bash
+cd /Users/theov/Documents/3.2/MIE359/study-site
+python3 build.py && python3 export_static.py
+npx wrangler pages deploy dist --project-name mie359-study-site
+```
+
+Compatibility fallback for environments currently calling `wrangler deploy`:
+
+```bash
+cd /Users/theov/Documents/3.2/MIE359/study-site
+python3 build.py && python3 export_static.py
+npx wrangler deploy
+```
+
+The fallback works because `wrangler.toml` now points `assets.directory` at `dist`, which satisfies the exact error shown when Cloudflare tried to deploy without a Worker entrypoint.

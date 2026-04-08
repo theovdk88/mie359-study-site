@@ -338,24 +338,7 @@ function renderQuiz(title, id, questions, mode) {
 
   const items = questions
     .map(
-      (question, index) => `
-        <article class="quiz-card note-card">
-          <p class="mini-label">Question ${index + 1}</p>
-          <h3>${escapeHtml(question.prompt)}</h3>
-          <div class="quiz-options">
-            ${question.options
-              .map(
-                (option, optionIndex) => `
-                  <label class="quiz-option">
-                    <input type="radio" name="q-${index}" value="${escapeAttribute(option)}">
-                    <span>${escapeHtml(option)}</span>
-                  </label>
-                `,
-              )
-              .join("")}
-          </div>
-        </article>
-      `,
+      (question, index) => renderQuizQuestion(question, index),
     )
     .join("");
 
@@ -377,49 +360,161 @@ function renderQuiz(title, id, questions, mode) {
   `;
 }
 
+function renderQuizQuestion(question, index) {
+  const meta = `
+    <div class="quiz-meta-row">
+      <p class="mini-label">Question ${index + 1}</p>
+      <span class="quiz-kind">${escapeHtml(formatQuizKind(question.type, question.source_kind))}</span>
+    </div>
+  `;
+
+  if (question.type === "self_check") {
+    return `
+      <article class="quiz-card note-card quiz-card-self-check" data-question-type="self_check" data-index="${index}">
+        ${meta}
+        <h3>${escapeHtml(question.prompt)}</h3>
+        <div class="self-check-tools">
+          <button class="button-link subtle self-check-reveal" type="button" data-index="${index}">Reveal Answer</button>
+          <button class="button-link subtle self-check-mark" type="button" data-index="${index}" data-result="got_it">I Got It</button>
+          <button class="button-link subtle self-check-mark" type="button" data-index="${index}" data-result="missed">I Missed It</button>
+        </div>
+        <div class="self-check-answer" id="self-check-answer-${index}" hidden>
+          <p class="mini-label">Model Answer</p>
+          <p>${escapeHtml(question.answer)}</p>
+        </div>
+        <p class="self-check-status" id="self-check-status-${index}">Use this as a self-check prompt, then reveal the answer and mark how you did.</p>
+      </article>
+    `;
+  }
+
+  return `
+    <article class="quiz-card note-card" data-question-type="multiple_choice" data-index="${index}">
+      ${meta}
+      <h3>${escapeHtml(question.prompt)}</h3>
+      <div class="quiz-options">
+        ${question.options
+          .map(
+            (option) => `
+              <label class="quiz-option">
+                <input type="radio" name="q-${index}" value="${escapeAttribute(option)}">
+                <span>${escapeHtml(option)}</span>
+              </label>
+            `,
+          )
+          .join("")}
+      </div>
+    </article>
+  `;
+}
+
+function formatQuizKind(type, sourceKind) {
+  if (type === "self_check") return "Self-check";
+  if (sourceKind === "framework") return "Framework MC";
+  if (sourceKind === "example") return "Scenario MC";
+  if (sourceKind === "definition_match") return "Concept MC";
+  if (sourceKind === "recognition") return "Concept MC";
+  return "Quiz";
+}
+
+function displayQuizAnswer(question) {
+  if (question.answer_label && question.answer_label !== question.answer) {
+    return `${question.answer_label}: ${question.answer}`;
+  }
+  return question.answer;
+}
+
 function attachQuizHandlers(chapterId, title, questions, mode) {
   const form = document.querySelector("#quiz-form");
   const resultsEl = document.querySelector("#quiz-results");
   if (!form || !resultsEl) return;
+  const selfCheckState = new Map();
+
+  form.querySelectorAll(".self-check-reveal").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.dataset.index);
+      const current = selfCheckState.get(index) || {};
+      selfCheckState.set(index, { ...current, revealed: true });
+      syncSelfCheckCard(index, selfCheckState);
+    });
+  });
+
+  form.querySelectorAll(".self-check-mark").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.dataset.index);
+      const result = button.dataset.result;
+      const current = selfCheckState.get(index) || {};
+      selfCheckState.set(index, { ...current, result, revealed: current.revealed ?? false });
+      syncSelfCheckCard(index, selfCheckState);
+    });
+  });
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const payload = questions.map((question, index) => {
+      if (question.type === "self_check") {
+        const stateForQuestion = selfCheckState.get(index) || { revealed: false, result: "" };
+        return {
+          question,
+          selected: stateForQuestion.result || "",
+          correct: stateForQuestion.result !== "missed",
+          reviewed: Boolean(stateForQuestion.revealed || stateForQuestion.result),
+        };
+      }
       const choice = form.querySelector(`input[name="q-${index}"]:checked`);
       return {
         question,
         selected: choice?.value || "",
         correct: choice?.value === question.answer,
+        reviewed: Boolean(choice?.value),
       };
     });
 
-    const score = payload.filter((entry) => entry.correct).length;
-    const wrong = payload.filter((entry) => !entry.correct);
+    const multipleChoice = payload.filter((entry) => entry.question.type === "multiple_choice");
+    const score = multipleChoice.filter((entry) => entry.correct).length;
+    const wrong = multipleChoice.filter((entry) => !entry.correct);
+    const selfCheck = payload.filter((entry) => entry.question.type === "self_check");
+    const missedSelfChecks = selfCheck.filter((entry) => entry.selected === "missed");
+    const reviewedSelfChecks = selfCheck.filter((entry) => entry.reviewed).length;
+
     state.progress.quizScores[`${mode}:${chapterId}:${Date.now()}`] = {
       chapterId,
       title,
       score,
-      total: questions.length,
+      total: multipleChoice.length,
+      selfCheckReviewed: reviewedSelfChecks,
+      selfCheckTotal: selfCheck.length,
     };
-    wrong.forEach((entry) => saveWeakTopic(chapterId, title, entry.question.prompt, entry.question.answer));
+    wrong.forEach((entry) => saveWeakTopic(chapterId, title, entry.question.prompt, displayQuizAnswer(entry.question), { type: "multiple_choice", source_kind: entry.question.source_kind }));
+    missedSelfChecks.forEach((entry) => saveWeakTopic(chapterId, title, entry.question.prompt, displayQuizAnswer(entry.question), { type: "self_check", source_kind: entry.question.source_kind }));
     persistProgress();
     updateProgressPill();
 
     resultsEl.innerHTML = `
       <section class="note-card results-card">
         <p class="eyebrow">Results</p>
-        <h3>${score} / ${questions.length}</h3>
-        <p>${wrong.length ? "Missed questions were added to Weak Topic Review." : "Perfect run."}</p>
+        <h3>${multipleChoice.length ? `${score} / ${multipleChoice.length}` : "Self-check set complete"}</h3>
+        <p>
+          ${
+            wrong.length || missedSelfChecks.length
+              ? "Missed items were added to Weak Topic Review."
+              : "No misses recorded in this round."
+          }
+        </p>
+        <p class="results-summary">
+          ${multipleChoice.length ? `Multiple-choice scored: ${score}/${multipleChoice.length}. ` : ""}
+          ${selfCheck.length ? `Self-check reviewed: ${reviewedSelfChecks}/${selfCheck.length}. Missed self-checks: ${missedSelfChecks.length}.` : ""}
+        </p>
         ${
-          wrong.length
+          wrong.length || missedSelfChecks.length
             ? `
               <div class="results-list">
-                ${wrong
+                ${[...wrong, ...missedSelfChecks]
                   .map(
                     (entry) => `
                       <article class="result-item">
+                        <p class="mini-label">${escapeHtml(formatQuizKind(entry.question.type, entry.question.source_kind))}</p>
                         <p><strong>Prompt:</strong> ${escapeHtml(entry.question.prompt)}</p>
-                        <p><strong>Correct answer:</strong> ${escapeHtml(entry.question.answer)}</p>
+                        <p><strong>Correct answer:</strong> ${escapeHtml(displayQuizAnswer(entry.question))}</p>
                       </article>
                     `,
                   )
@@ -431,6 +526,33 @@ function attachQuizHandlers(chapterId, title, questions, mode) {
       </section>
     `;
   });
+}
+
+function syncSelfCheckCard(index, selfCheckState) {
+  const cardEl = document.querySelector(`.quiz-card-self-check[data-index="${index}"]`);
+  const answerEl = document.querySelector(`#self-check-answer-${index}`);
+  const statusEl = document.querySelector(`#self-check-status-${index}`);
+  if (!cardEl || !answerEl || !statusEl) return;
+
+  const current = selfCheckState.get(index) || { revealed: false, result: "" };
+  answerEl.hidden = !current.revealed;
+  cardEl.classList.toggle("is-reviewed", Boolean(current.revealed));
+  cardEl.classList.toggle("is-missed", current.result === "missed");
+  cardEl.classList.toggle("is-got-it", current.result === "got_it");
+
+  cardEl.querySelectorAll(".self-check-mark").forEach((button) => {
+    button.classList.toggle("is-selected", button.dataset.result === current.result);
+  });
+
+  if (current.result === "missed") {
+    statusEl.textContent = "Marked as missed. This will be saved to Weak Topic Review when you submit.";
+  } else if (current.result === "got_it") {
+    statusEl.textContent = "Marked as correct.";
+  } else if (current.revealed) {
+    statusEl.textContent = "Answer revealed. Mark how you did.";
+  } else {
+    statusEl.textContent = "Use this as a self-check prompt, then reveal the answer and mark how you did.";
+  }
 }
 
 function renderDefinitions() {
@@ -479,6 +601,7 @@ function renderWeakTopics() {
                   .map(
                     (item) => `
                       <article class="result-item">
+                        ${item.type ? `<p class="mini-label">${escapeHtml(formatQuizKind(item.type, item.source_kind))}</p>` : ""}
                         <p><strong>Prompt:</strong> ${escapeHtml(item.prompt)}</p>
                         <p><strong>Answer:</strong> ${escapeHtml(item.answer)}</p>
                       </article>
@@ -519,11 +642,11 @@ function markChapterViewed(id) {
   updateProgressPill();
 }
 
-function saveWeakTopic(chapterId, title, prompt, answer) {
+function saveWeakTopic(chapterId, title, prompt, answer, meta = {}) {
   const key = `${chapterId}:${prompt}`;
   const existing = state.progress.weakTopics.find((item) => item.key === key);
   if (existing) return;
-  state.progress.weakTopics.push({ key, chapterId, title, prompt, answer });
+  state.progress.weakTopics.push({ key, chapterId, title, prompt, answer, ...meta });
 }
 
 function getChapter(id) {

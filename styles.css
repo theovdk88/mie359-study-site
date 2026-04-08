@@ -527,6 +527,26 @@ code {
   padding: 1.3rem 1.4rem;
 }
 
+.quiz-meta-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.quiz-kind {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.65rem;
+  border-radius: 999px;
+  background: rgba(45, 72, 64, 0.08);
+  color: var(--muted);
+  font-family: "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .quiz-card h3 {
   margin: 0.35rem 0 1rem;
   font-size: 1.2rem;
@@ -544,6 +564,46 @@ code {
   padding: 0.8rem 0.9rem;
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.55);
+}
+
+.quiz-card-self-check {
+  border: 1px solid rgba(45, 72, 64, 0.1);
+}
+
+.self-check-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.self-check-mark.is-selected {
+  background: rgba(34, 67, 59, 0.1);
+}
+
+.quiz-card-self-check.is-missed {
+  border-color: rgba(138, 50, 43, 0.24);
+  background: linear-gradient(180deg, rgba(255, 249, 246, 0.96), rgba(248, 238, 234, 0.92));
+}
+
+.quiz-card-self-check.is-got-it {
+  border-color: rgba(34, 67, 59, 0.18);
+}
+
+.self-check-answer {
+  margin-top: 1rem;
+  padding: 1rem 1.05rem;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.56);
+  border: 1px solid rgba(63, 52, 39, 0.08);
+}
+
+.self-check-answer p:last-child {
+  margin-bottom: 0;
+}
+
+.self-check-status,
+.results-summary {
+  color: var(--muted);
 }
 
 .results-card,
