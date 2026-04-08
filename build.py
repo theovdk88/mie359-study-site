@@ -118,6 +118,24 @@ LOW_VALUE_CARD_KEYS = {
     "short-term effects",
     "long-term effects",
 }
+LOW_VALUE_DEFINITION_MATCH_KEYS = {
+    "organizational design",
+    "organization",
+    "organizational theory",
+    "organizational structure",
+    "classical management",
+    "scientific management",
+    "administrative principles",
+    "contemporary management",
+    "communication in organizations",
+    "future of work",
+    "virtual work",
+    "power",
+    "positional power",
+    "personal power",
+    "international business",
+    "strategy",
+}
 QUIZ_STOPWORDS = {
     "a",
     "an",
@@ -231,6 +249,7 @@ def main() -> None:
 
         overview_node = first_matching_node(document_nodes, is_overview_title)
         practice_node = first_matching_node(document_nodes, is_practice_title)
+        flashcard_node = first_matching_node(document_nodes, is_flashcard_title)
 
         content_nodes = [
             node
@@ -244,8 +263,10 @@ def main() -> None:
         chapter_definitions = collect_definitions(content_nodes, chapter_meta["id"], title)
         definitions.extend(chapter_definitions)
 
+        curated_flashcards = extract_curated_flashcards(flashcard_node, chapter_meta["id"])
         flashcards = dedupe_flashcards(
-            generate_definition_flashcards(chapter_definitions, chapter_meta["id"])
+            curated_flashcards
+            + generate_definition_flashcards(chapter_definitions, chapter_meta["id"])
             + generate_concept_flashcards(content_nodes, chapter_meta["id"])
             + generate_framework_flashcards(content_nodes, chapter_meta["id"])
             + generate_comparison_flashcards(content_nodes, chapter_meta["id"])
@@ -801,6 +822,24 @@ def extract_ordered_component_definitions(lines: list[str]) -> list[tuple[str, s
     return [(term, definition) for term, definition in components if term]
 
 
+def definition_prompt_for_term(term: str) -> str:
+    key = normalize_key(term)
+    plural_terms = (
+        "principles",
+        "studies",
+        "values",
+        "goals",
+        "alliances",
+        "mechanisms",
+        "variables",
+        "dimensions",
+        "stages",
+        "challenges",
+    )
+    verb = "are" if key.endswith(plural_terms) or key in {"administrative principles", "hawthorne studies"} else "is"
+    return f"What {verb} {term}?"
+
+
 def generate_definition_flashcards(definitions: list[dict], chapter_id: str) -> list[dict]:
     cards = []
     for entry in definitions:
@@ -808,7 +847,7 @@ def generate_definition_flashcards(definitions: list[dict], chapter_id: str) -> 
             continue
         term = entry["term"]
         definition = entry["definition"]
-        cards.append(make_flashcard(chapter_id, f"What is {term}?", definition, "definition", topic=term))
+        cards.append(make_flashcard(chapter_id, definition_prompt_for_term(term), definition, "definition", topic=term))
     return cards
 
 
@@ -823,7 +862,7 @@ def generate_concept_flashcards(nodes: list[Node], chapter_id: str) -> list[dict
         if should_generate_concept_cards(node, term):
             summary = extract_concept_summary(node)
             if summary:
-                cards.append(make_flashcard(chapter_id, f"What is {term}?", summary, "definition", topic=term))
+                cards.append(make_flashcard(chapter_id, definition_prompt_for_term(term), summary, "definition", topic=term))
         for child in node.children:
             walk(child, ancestors + [title])
 
@@ -1178,6 +1217,61 @@ def extract_practice_questions(node: Node | None) -> list[dict]:
     return questions
 
 
+def extract_curated_flashcards(node: Node | None, chapter_id: str) -> list[dict]:
+    if not node:
+        return []
+
+    cards: list[dict] = []
+
+    def walk(current: Node) -> None:
+        for raw_line in current.lines:
+            card = parse_curated_flashcard_line(raw_line, chapter_id)
+            if card:
+                cards.append(card)
+        for child in current.children:
+            walk(child)
+
+    walk(node)
+    return cards
+
+
+def parse_curated_flashcard_line(raw_line: str, chapter_id: str) -> dict | None:
+    line = raw_line.strip()
+    bullet_match = UNORDERED_ITEM_RE.match(line)
+    if bullet_match:
+        line = bullet_match.group(1).strip()
+    if not line:
+        return None
+
+    if line.startswith("**") and "→" in line:
+        prompt_part, answer_part = line.split("→", 1)
+        prompt = clean_definition_text(prompt_part.strip().strip("*"))
+        answer = clean_definition_text(answer_part)
+        if prompt and answer:
+            return make_flashcard(
+                chapter_id,
+                prompt,
+                answer,
+                infer_curated_flashcard_kind(prompt, answer),
+                topic=infer_term(prompt) or prompt,
+                source="curated",
+            )
+    return None
+
+
+def infer_curated_flashcard_kind(front: str, back: str) -> str:
+    front_key = normalize_key(front)
+    if "difference between" in front_key or "compare" in front_key:
+        return "comparison"
+    if any(token in front_key for token in ("what are the stages", "what are the dimensions", "what are the components", "what are the main components", "what are the five", "what are the four")):
+        return "framework"
+    if front_key.startswith("which concept") or front_key.startswith("which idea") or front_key.startswith("which framework"):
+        return "recognition"
+    if "scenario" in front_key or "example" in front_key:
+        return "example"
+    return "definition"
+
+
 def build_quiz_bank(
     chapter_title: str,
     chapter_id: str,
@@ -1216,9 +1310,12 @@ def build_question_knowledge(content_nodes: list[Node], definitions: list[dict],
     concept_answers: dict[str, str] = {}
     concepts: dict[str, str] = {}
     frameworks: list[dict] = []
+    framework_details: list[dict] = []
     comparisons: list[dict] = []
     chunks: list[dict] = []
+    section_chunks: list[dict] = []
     concept_entries: list[dict] = []
+    study_prompts: list[dict] = []
 
     for entry in definitions:
         key = normalize_key(entry["term"])
@@ -1255,9 +1352,28 @@ def build_question_knowledge(content_nodes: list[Node], definitions: list[dict],
             chunk_text = build_chunk_text(node)
             if chunk_text and normalize_key(term) not in LOW_VALUE_CARD_KEYS:
                 chunks.append({"title": term, "text": chunk_text})
+            if chunk_text and not (is_related_title(title) or in_related_context(ancestors)):
+                section_chunks.append(
+                    {
+                        "title": title,
+                        "context": ancestors[-1] if ancestors else "",
+                        "text": chunk_text,
+                    }
+                )
 
             if not (is_related_title(title) or in_related_context(ancestors)):
-                for component_term, component_definition in extract_ordered_component_definitions(node.lines):
+                component_definitions = extract_ordered_component_definitions(node.lines)
+                if component_definitions and len(component_definitions) >= 3:
+                    framework_details.append(
+                        {
+                            "topic": title,
+                            "components": [
+                                {"term": component_term, "definition": component_definition}
+                                for component_term, component_definition in component_definitions
+                            ],
+                        }
+                    )
+                for component_term, component_definition in component_definitions:
                     component_key = normalize_key(component_term)
                     current_component = concept_answers.get(component_key, "")
                     if len(component_definition) > len(current_component):
@@ -1277,6 +1393,8 @@ def build_question_knowledge(content_nodes: list[Node], definitions: list[dict],
         topic = clean_definition_text(card.get("topic") or infer_term(card["front"]) or "")
         if topic:
             concepts.setdefault(normalize_key(topic), topic)
+        if card["kind"] in {"definition", "comparison", "framework"}:
+            study_prompts.append({"prompt": card["front"], "answer": card["back"]})
         if card["kind"] == "framework":
             frameworks.append(
                 {
@@ -1301,9 +1419,12 @@ def build_question_knowledge(content_nodes: list[Node], definitions: list[dict],
         "concept_answers": concept_answers,
         "concepts": concepts,
         "frameworks": frameworks,
+        "framework_details": framework_details,
         "comparisons": comparisons,
         "chunks": chunks,
+        "section_chunks": section_chunks,
         "concept_entries": dedupe_concept_entries(concept_entries),
+        "study_prompts": study_prompts,
         "chapter_terms": sorted(
             [
                 term
@@ -1341,6 +1462,8 @@ def build_chunk_text(node: Node) -> str:
 def build_definition_option_text(term: str, definition: str) -> str:
     stripped = strip_term_prefix(term, definition)
     cleaned = limit_sentences(clean_definition_text(stripped), 2).rstrip(".")
+    cleaned = re.sub(r"^(is|are)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(means)\s+", "", cleaned, flags=re.IGNORECASE)
     return cleaned[0].upper() + cleaned[1:] + "." if cleaned else ""
 
 
@@ -1384,7 +1507,7 @@ def infer_concept_family(term: str, definition: str) -> str:
     text = normalize_key(f"{term} {definition}")
     families = {
         "communication": ("communication", "voice", "linkage", "media", "message"),
-        "structure": ("structure", "coordination", "hierarchy", "department", "functional", "divisional", "matrix", "centralization"),
+        "structure": ("structure", "coordination", "hierarchy", "department", "functional", "divisional", "matrix", "centralization", "supervision", "skills", "outputs", "labour", "span"),
         "strategy": ("strategy", "goal", "mission", "vision", "efficiency", "effectiveness", "prospector", "defender", "analyzer", "reactor"),
         "technology": ("technology", "production", "routine", "craft", "mass", "continuous"),
         "culture": ("culture", "ceremon", "symbol", "value", "assumption", "socialization"),
@@ -1412,6 +1535,10 @@ def resolve_practice_answer(prompt: str, knowledge: dict) -> str:
         if answer:
             matched_answers.append(answer)
 
+    flashcard_answer = find_study_prompt_answer(prompt, knowledge.get("study_prompts", []))
+    if flashcard_answer:
+        return flashcard_answer
+
     comparison_answer = find_comparison_answer(prompt, topics, knowledge["comparisons"])
     if comparison_answer:
         return comparison_answer
@@ -1423,6 +1550,10 @@ def resolve_practice_answer(prompt: str, knowledge: dict) -> str:
     framework_answer = find_framework_answer(prompt, topics, knowledge["frameworks"])
     if framework_answer:
         return framework_answer
+
+    section_answer = best_matching_section_chunk(prompt, knowledge.get("section_chunks", []))
+    if section_answer:
+        return section_answer
 
     if len(matched_answers) >= 2 and any(token in prompt_key for token in (" and ", "compare", "difference", "distinction", "versus", " vs ")):
         return merge_answer_parts(matched_answers)
@@ -1444,6 +1575,27 @@ def resolve_practice_answer(prompt: str, knowledge: dict) -> str:
     return ""
 
 
+def find_study_prompt_answer(prompt: str, study_prompts: list[dict]) -> str | None:
+    best = None
+    best_score = 0
+    second_best = 0
+    for entry in study_prompts:
+        score = significant_overlap(prompt, entry["prompt"]) * 3
+        if normalize_key(prompt).rstrip("?") == normalize_key(entry["prompt"]).rstrip("?"):
+            score += 8
+        if score > best_score:
+            second_best = best_score
+            best = entry["answer"]
+            best_score = score
+        elif score > second_best:
+            second_best = score
+    if best_score >= 6:
+        return best
+    if best_score >= 3 and best_score > second_best:
+        return best
+    return None
+
+
 def best_matching_concept_answer(prompt: str, concept_entries: list[dict]) -> str | None:
     best_answer = None
     best_score = 0
@@ -1456,6 +1608,19 @@ def best_matching_concept_answer(prompt: str, concept_entries: list[dict]) -> st
     return best_answer
 
 
+def best_matching_section_chunk(prompt: str, section_chunks: list[dict]) -> str | None:
+    best_text = None
+    best_score = 0
+    for chunk in section_chunks:
+        score = significant_overlap(prompt, chunk["title"]) * 4
+        score += significant_overlap(prompt, chunk["context"]) * 2
+        score += significant_overlap(prompt, chunk["text"])
+        if score > best_score and score >= 4:
+            best_score = score
+            best_text = chunk["text"]
+    return best_text
+
+
 def find_specific_framework_component_answer(prompt: str, knowledge: dict) -> str | None:
     prompt_key = normalize_key(prompt)
     if not any(token in prompt_key for token in ("which", "what")):
@@ -1465,19 +1630,34 @@ def find_specific_framework_component_answer(prompt: str, knowledge: dict) -> st
 
     requested_types = infer_requested_framework_types(prompt_key)
     component_matches: list[tuple[int, str, str]] = []
-    for framework in knowledge["frameworks"]:
-        framework_text = normalize_key(f"{framework['topic']} {framework['front']}")
+    detailed_frameworks = knowledge.get("framework_details") or []
+    for framework in detailed_frameworks:
+        framework_text = normalize_key(framework["topic"])
         if requested_types and not framework_matches_requested_types(framework_text, prompt_key, requested_types):
             continue
-        framework_bonus = significant_overlap(prompt, framework["topic"]) * 2 + significant_overlap(prompt, framework["front"])
+        framework_bonus = significant_overlap(prompt, framework["topic"]) * 3
         for component in framework["components"]:
-            component_key = normalize_key(component)
-            component_answer = resolve_component_answer(component, knowledge)
+            component_term = component["term"]
+            component_answer = component["definition"] or resolve_component_answer(component_term, knowledge)
             score = framework_bonus
-            score += significant_overlap(prompt, component) * 4
+            score += significant_overlap(prompt, component_term) * 4
             score += significant_overlap(prompt, component_answer)
             if score > 0:
-                component_matches.append((score, component, component_answer))
+                component_matches.append((score, component_term, component_answer))
+
+    if not component_matches:
+        for framework in knowledge["frameworks"]:
+            framework_text = normalize_key(f"{framework['topic']} {framework['front']}")
+            if requested_types and not framework_matches_requested_types(framework_text, prompt_key, requested_types):
+                continue
+            framework_bonus = significant_overlap(prompt, framework["topic"]) * 2 + significant_overlap(prompt, framework["front"])
+            for component in framework["components"]:
+                component_answer = resolve_component_answer(component, knowledge)
+                score = framework_bonus
+                score += significant_overlap(prompt, component) * 4
+                score += significant_overlap(prompt, component_answer)
+                if score > 0:
+                    component_matches.append((score, component, component_answer))
 
     if not component_matches:
         return None
@@ -1544,10 +1724,6 @@ def resolve_component_answer(component: str, knowledge: dict) -> str:
 
 def build_multiple_choice_questions(chapter_title: str, chapter_id: str, flashcards: list[dict], knowledge: dict) -> list[dict]:
     questions: list[dict] = []
-    framework_components = []
-    for framework in knowledge["frameworks"]:
-        framework_components.extend(framework["components"])
-
     questions.extend(build_definition_choice_questions(chapter_title, chapter_id, knowledge["concept_entries"]))
     questions.extend(build_scenario_choice_questions(chapter_title, chapter_id, flashcards, knowledge["concept_entries"]))
 
@@ -1558,7 +1734,7 @@ def build_multiple_choice_questions(chapter_title: str, chapter_id: str, flashca
         if len(components) < 3:
             continue
         correct = components[0]
-        distractors = pick_component_distractors(correct, framework_components)
+        distractors = pick_framework_distractors(correct, card.get("topic") or card["front"], components, knowledge["concept_entries"])
         if len(distractors) == 3:
             questions.append(
                 {
@@ -1581,9 +1757,15 @@ def build_multiple_choice_questions(chapter_title: str, chapter_id: str, flashca
 
 def build_definition_choice_questions(chapter_title: str, chapter_id: str, concept_entries: list[dict]) -> list[dict]:
     questions: list[dict] = []
+    family_counts: dict[str, int] = {}
+    for entry in concept_entries:
+        family_counts[entry["family"]] = family_counts.get(entry["family"], 0) + 1
+
     for index, entry in enumerate(sorted(concept_entries, key=lambda item: normalize_key(item["term"]))):
-        if len(questions) >= 6:
+        if len(questions) >= 4:
             break
+        if not should_offer_definition_match(entry, family_counts):
+            continue
         options = build_definition_options(entry, concept_entries)
         if len(options) != 4:
             continue
@@ -1603,6 +1785,17 @@ def build_definition_choice_questions(chapter_title: str, chapter_id: str, conce
             }
         )
     return questions
+
+
+def should_offer_definition_match(entry: dict, family_counts: dict[str, int]) -> bool:
+    key = normalize_key(entry["term"])
+    if key in LOW_VALUE_DEFINITION_MATCH_KEYS:
+        return False
+    if family_counts.get(entry["family"], 0) < 4:
+        return False
+    if len(entry["term"].split()) > 5:
+        return False
+    return True
 
 
 def build_definition_options(entry: dict, concept_entries: list[dict]) -> list[str]:
@@ -1691,9 +1884,36 @@ def build_scenario_choice_questions(chapter_title: str, chapter_id: str, flashca
     return questions
 
 
-def pick_component_distractors(correct: str, components: list[str]) -> list[str]:
-    pool = [component for component in components if normalize_key(component) != normalize_key(correct)]
-    return pick_distractors(correct, pool, 3)
+def pick_framework_distractors(correct: str, framework_topic: str, framework_components: list[str], concept_entries: list[dict]) -> list[str]:
+    family = infer_concept_family(f"{framework_topic} {correct}", f"{framework_topic} {correct}")
+    framework_keys = {normalize_key(component) for component in framework_components}
+    ranked_pool = sorted(
+        [
+            entry["term"]
+            for entry in concept_entries
+            if normalize_key(entry["term"]) != normalize_key(correct)
+            and normalize_key(entry["term"]) not in framework_keys
+            and normalize_key(entry["term"]) not in LOW_VALUE_DEFINITION_MATCH_KEYS
+            and entry["family"] == family
+        ],
+        key=lambda term: (
+            -significant_overlap(correct, term),
+            abs(len(term.split()) - len(correct.split())),
+            normalize_key(term),
+        ),
+    )
+    distractors = pick_distractors(correct, ranked_pool, 3)
+    if len(distractors) == 3:
+        return distractors
+
+    fallback_pool = [
+        entry["term"]
+        for entry in concept_entries
+        if normalize_key(entry["term"]) != normalize_key(correct)
+        and normalize_key(entry["term"]) not in framework_keys
+        and normalize_key(entry["term"]) not in LOW_VALUE_DEFINITION_MATCH_KEYS
+    ]
+    return pick_distractors(correct, fallback_pool, 3)
 
 
 def find_comparison_answer(prompt: str, topics: list[str], comparisons: list[dict]) -> str | None:
@@ -1782,7 +2002,8 @@ def significant_overlap(left: str, right: str) -> int:
 
 def significant_words(text: str) -> set[str]:
     raw_words = {word for word in re.findall(r"[a-zA-Z][a-zA-Z'/-]+", normalize_key(text)) if word not in QUIZ_STOPWORDS}
-    words = {word for word in raw_words if len(word) > 2}
+    important_short_words = {"ai", "hr"}
+    words = {word for word in raw_words if len(word) > 2 or word in important_short_words}
     singularized = {
         word[:-1]
         for word in words
@@ -1940,7 +2161,7 @@ def shuffle_like(options: list[str]) -> list[str]:
     return sorted(options, key=lambda item: normalize_key(item))
 
 
-def make_flashcard(chapter_id: str, front: str, back: str, kind: str, topic: str | None = None) -> dict:
+def make_flashcard(chapter_id: str, front: str, back: str, kind: str, topic: str | None = None, source: str = "generated") -> dict:
     return {
         "id": flashcard_id(chapter_id, front, back),
         "chapter_id": chapter_id,
@@ -1948,6 +2169,7 @@ def make_flashcard(chapter_id: str, front: str, back: str, kind: str, topic: str
         "back": clean_definition_text(back),
         "kind": kind,
         "topic": topic or infer_term(front) or front,
+        "source": source,
     }
 
 
@@ -1994,7 +2216,9 @@ def score_flashcard(card: dict) -> tuple[int, int, int]:
         "recognition": 2,
         "example": 1,
     }
+    source_priority = {"curated": 2, "generated": 1}
     return (
+        source_priority.get(card.get("source", "generated"), 0),
         kind_priority.get(card["kind"], 0),
         min(len(card["back"]), 260),
         -len(card["front"]),
